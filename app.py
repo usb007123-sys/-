@@ -1,18 +1,32 @@
 import streamlit as st
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
-import os
+import pandas as pd
 import isodate
 
-# ====== UI ======
+# ====== UI 設定 ======
 st.set_page_config(page_title="YouTube Shorts 熱門搜尋器", layout="wide")
 st.title("🎬 YouTube Shorts 熱門搜尋器（Streamlit 版）")
 
-# ====== Helper Functions ======
-@st.cache_data(show_spinner=False)
+# ====== 快取 YouTube 服務物件 ======
+@st.cache_resource
 def get_youtube_service(api_key):
     return build('youtube', 'v3', developerKey=api_key)
 
+# ====== 快取影片類別 ======
+@st.cache_data(show_spinner=False)
+def get_video_categories(api_key, region_code='TW'):
+    youtube = get_youtube_service(api_key)
+    categories_response = youtube.videoCategories().list(
+        part='snippet',
+        regionCode=region_code
+    ).execute()
+    categories = {}
+    for item in categories_response['items']:
+        categories[item['id']] = item['snippet']['title']
+    return categories
+
+# ====== 工具函數 ======
 def get_time_filter(hours):
     if hours == "all":
         return None
@@ -40,34 +54,7 @@ def get_duration_seconds(duration):
     except:
         return 0
 
-def format_view_count(view_count):
-    try:
-        count = int(view_count)
-        if count >= 1000000:
-            return f"{count/1000000:.1f}M"
-        elif count >= 1000:
-            return f"{count/1000:.1f}K"
-        else:
-            return str(count)
-    except:
-        return view_count
-
-@st.cache_data(show_spinner=False)
-def get_video_categories(youtube, region_code='TW'):
-    categories_response = youtube.videoCategories().list(
-        part='snippet',
-        regionCode=region_code
-    ).execute()
-    categories = {}
-    for item in categories_response['items']:
-        categories[item['id']] = item['snippet']['title']
-    return categories
-
-def get_category_name(category_id, categories_dict):
-    return categories_dict.get(category_id, f'未知類別 ({category_id})')
-
-# ====== Sidebar / Form Inputs ======
-
+# ====== Sidebar 搜尋條件 ======
 with st.sidebar:
     st.header("API Key 設定")
     api_key = st.text_input("請輸入 YouTube API Key", type="password", help="需啟用 YouTube Data API v3")
@@ -106,15 +93,14 @@ with st.sidebar:
     st.markdown("---")
     search_btn = st.button("🔍 搜尋影片")
 
-# ====== Search and Results ======
+# ====== 搜尋並顯示結果 ======
 if search_btn:
     if not api_key or len(api_key) < 20:
         st.error("請先輸入有效的 YouTube Data API Key。")
         st.stop()
-    
     try:
         youtube = get_youtube_service(api_key)
-        categories = get_video_categories(youtube, region_code=region_filter)
+        categories = get_video_categories(api_key, region_code=region_filter)
         st.success(f"成功取得 API 與類別（共 {len(categories)} 個類別）")
     except Exception as e:
         st.error(f"API Key 錯誤或無法連線: {e}")
@@ -127,10 +113,9 @@ if search_btn:
         "q": q,
         "type": "video",
         "order": "relevance",
-        "maxResults": min(50, max_results*3),
+        "maxResults": min(50, max_results * 3),
         "regionCode": region_filter
     }
-    # 選擇語言
     lang_map = {"TW": "zh", "CN": "zh", "HK": "zh", "SG": "zh", "JP": "ja", "KR": "ko", "NO": "no", "CH": "de", "DE": "de", "DK": "da", "AE": "ar", "SA": "ar", "US": "en", "GB": "en", "CA": "en", "AU": "en", "IN": "en", "FR": "fr", "RU": "ru"}
     if region_filter in lang_map:
         search_params["relevanceLanguage"] = lang_map[region_filter]
@@ -141,7 +126,7 @@ if search_btn:
         if published_after:
             search_params["publishedAfter"] = published_after
 
-    # ====== 搜尋 ======
+    # ====== 搜尋影片 ======
     with st.spinner("正在搜尋影片..."):
         try:
             search_response = youtube.search().list(**search_params).execute()
@@ -157,23 +142,23 @@ if search_btn:
             all_video_ids.append(video_id)
             seen_ids.add(video_id)
 
-    # 取得更多頁數（如果需要）
-    while len(all_video_ids) < min(max_results*2, 50) and "nextPageToken" in search_response:
+    # 下一頁（如有需要）
+    while len(all_video_ids) < min(max_results * 2, 50) and "nextPageToken" in search_response:
         search_params["pageToken"] = search_response["nextPageToken"]
         search_response = youtube.search().list(**search_params).execute()
         for item in search_response.get("items", []):
             video_id = item["id"]["videoId"]
-            if video_id not in seen_ids and len(all_video_ids)<50:
+            if video_id not in seen_ids and len(all_video_ids) < 50:
                 all_video_ids.append(video_id)
                 seen_ids.add(video_id)
         if len(all_video_ids) >= 50:
             break
 
-    # 查詢影片詳細
+    # 取得影片詳細資料
     batch_size = 50
     all_video_items = []
     for i in range(0, len(all_video_ids), batch_size):
-        batch_ids = all_video_ids[i:i+batch_size]
+        batch_ids = all_video_ids[i:i + batch_size]
         try:
             videos_response = youtube.videos().list(
                 part="snippet,statistics,contentDetails",
@@ -183,7 +168,7 @@ if search_btn:
         except Exception as e:
             st.warning(f"部份影片詳情查詢失敗: {e}")
 
-    # 資料整理與過濾
+    # 組裝結果
     videos = []
     for item in all_video_items:
         video_data = item["snippet"]
@@ -192,13 +177,12 @@ if search_btn:
         view_count = int(statistics.get("viewCount", 0))
         if view_count < min_views:
             continue
-        # 時長判斷
         if max_duration != "all":
             duration_seconds = get_duration_seconds(content_details.get("duration", ""))
             if duration_seconds > int(max_duration):
                 continue
         category_id = video_data.get("categoryId", "")
-        category_name = get_category_name(category_id, categories)
+        category_name = categories.get(category_id, f'未知類別 ({category_id})')
         video_info = {
             "影片ID": item["id"],
             "影片標題": video_data["title"],
@@ -230,7 +214,8 @@ if search_btn:
         for v in videos:
             colL, colR = st.columns([1, 4])
             with colL:
-                st.image(v["縮圖"], width=170)
+                if v["縮圖"]:
+                    st.image(v["縮圖"], width=170)
             with colR:
                 st.markdown(f"**[{v['影片標題']}]({v['影片連結']})**")
                 st.write(f"頻道：{v['頻道名稱']}　|　類別：{v['影片類別']}　|　{v['影片長度']}　|　{v['觀看次數']}次")
@@ -238,7 +223,6 @@ if search_btn:
             st.divider()
 
         # 匯出 CSV
-        import pandas as pd
         csv_df = pd.DataFrame(videos)
         csv_bytes = csv_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button(
